@@ -1,0 +1,13 @@
+subscription_id     = "<subscription-id>"
+resource_group_name = "<existing-resource-group>"
+location            = "<azure-region>"
+
+# Required, globally unique (3-24 lowercase letters/digits), must not be an existing account:
+storage_account_name = "<unique-storage-account-name>"
+
+# Never put the NGC key here:  $env:TF_VAR_ngc_api_key = "<your key>"
+# Alternatively set everything with TF_VAR_subscription_id, TF_VAR_resource_group_name, TF_VAR_location ...
+
+# Private mode (see README section 8):
+# public_network_access   = "Disabled"
+# enable_private_endpoint = true
