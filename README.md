@@ -1,10 +1,16 @@
 # NVIDIA Nemotron NIMs on Azure Container Apps (serverless A100 / T4)
 
+![Azure Container Apps](https://img.shields.io/badge/Azure-Container%20Apps-0078D4?logo=microsoftazure&logoColor=white)
+![Bicep](https://img.shields.io/badge/IaC-Bicep-3F6EB5)
+![Terraform](https://img.shields.io/badge/IaC-Terraform-844FBA?logo=terraform&logoColor=white)
+![NVIDIA NIM](https://img.shields.io/badge/NVIDIA-NIM-76B900?logo=nvidia&logoColor=white)
+![GPU](https://img.shields.io/badge/serverless%20GPU-A100%20%7C%20T4-76B900?logo=nvidia&logoColor=white)
+
 Install guide for the 5 NVIDIA Nemotron container apps and their Container Apps environment.
 The region, subscription and resource group are **never hardcoded**: you pass them at deploy time (see §5 and §6).
 For this POC every app is reached on its own default FQDN (`https://<app-name>.<environment-default-domain>`), printed in the deployment outputs and listed in §7.
 
-```
+```text
 deploy-nvidia/
 ├─ README.md                      <- this guide
 ├─ scripts/create-share-folders.ps1   <- manual alternative to the folder creation done by the IaC
@@ -43,7 +49,9 @@ Serverless GPU facts that drive the sizing (Microsoft Learn, *Workload profiles*
 The environment defines three profiles: `Consumption` (default), `A100-Profile`, `T4-Profile`.
 (The live environment calls them `GPU` and `T4-Profile`; the IaC uses clearer names.)
 
+> [!TIP]
 > **Rule of thumb for choosing a profile:** model ≤ ~16 GB of GPU memory → T4 (much cheaper). LLM/VLM that needs more memory → A100.
+>
 > Only the nano VLM is on A100. The stock NIM images for graphic-elements and OCR list A100-class GPUs in NVIDIA's support matrix, not T4 (OCR is known to run on T4 in your live environment; graphic-elements on T4 is a choice to **validate** on first start).
 > If either fails to start on T4, change its profile to `A100-Profile` (one line: `main.bicep` / the `workload_profile_name` in its `.tf`).
 
@@ -79,8 +87,10 @@ Notes:
   Invoke-WebRequest 'https://nvcr.io/proxy_auth?scope=repository:nim/nvidia/nemotron-ocr-v1:pull' -Headers $h -UseBasicParsing | Select-Object StatusCode
   ```
 - The two detection apps have `NGC_API_KEY` too, but no `nvcr.io` registry entry: their image comes from the ACR and only the *runtime* download of weights talks to NGC.
-- The live apps were configured with the key as a **plain-text environment variable**. The IaC uses secrets + `secretRef`. **That key is visible to anyone who can read the apps' configuration – rotate it** in NGC after migrating.
 - Pin image tags (`:latest` is used today). NIM images are large; a floating tag makes every cold start/rollout non-reproducible.
+
+> [!IMPORTANT]
+> The live apps were configured with the NGC key as a **plain-text environment variable**, visible to anyone who can read the apps' configuration. The IaC uses secrets + `secretRef` instead. **Rotate the old key** in NGC after migrating, and never commit a key to this repository.
 
 ---
 
@@ -135,9 +145,11 @@ Order of resources (enforced by dependencies): storage account → share → **f
 
 Validated: `az bicep build` (0 warnings) and `az deployment group validate` (Succeeded).
 `location` and `storageAccountName` are **required parameters** with no default; subscription and resource group are the deployment target. `environmentName` / `logAnalyticsName` have generic defaults (`nim-gpu-env`, `nim-gpu-logs`) you can override.
-Storage account names are unique across all of Azure, so pick one that does not exist yet. The new account defaults to `Premium_LRS`; override `storageSkuName` (e.g. `PremiumV2_LRS`) for another file-share tier.
+> [!NOTE]
+> Storage account names are unique across all of Azure, so pick one that does not exist yet. The new account defaults to `Premium_LRS`; override `storageSkuName` (e.g. `PremiumV2_LRS`) for another file-share tier.
 
-> **Heads up – existing environment in the same resource group:** if the resource group already contains a Container Apps environment with different names,
+> [!WARNING]
+> **Existing environment in the same resource group:** if the resource group already contains a Container Apps environment with different names,
 > a deployment creates a **second environment with its own GPU replicas** – it can exhaust GPU quota and doubles cost.
 > Deploy into a fresh resource group, or reuse the existing environment/app names to update in place.
 
@@ -181,7 +193,8 @@ This app has **two containers in the same replica** (they share the network, so 
 
 The two add up to the 24 vCPU / 220 GiB of one A100 replica (the nginx share is taken from the NIM container, which is why it is 22 / 212 instead of 24 / 220).
 
-**Why:** the 12B model takes a very long time to load. With the ingress pointing at the NIM (port 8000) the platform probes a port that is not listening yet, and the deployment fails. With nginx the **ingress and the liveness/readiness probes target port 8080**, which answers as soon as nginx starts, so the app is created in a single step **with its ingress** – there is no second phase. Until the model has loaded, requests through the FQDN get a `502` from nginx; afterwards they are proxied to the NIM.
+> [!NOTE]
+> **Why the sidecar:** the 12B model takes a very long time to load. With the ingress pointing at the NIM (port 8000) the platform probes a port that is not listening yet, and the deployment fails. With nginx the **ingress and the liveness/readiness probes target port 8080**, which answers as soon as nginx starts, so the app is created in a single step **with its ingress** – there is no second phase. Until the model has loaded, requests through the FQDN get a `502` from nginx; afterwards they are proxied to the NIM.
 
 | Setting | Value |
 |---|---|
@@ -201,12 +214,14 @@ Implementation notes:
 - **Docker Hub:** `nginx:stable-alpine` is pulled anonymously from Docker Hub, which can be rate limited. If that matters, mirror it into a registry you control and set `nginxImage` / `nginx_image` (add registry credentials or an identity for that registry).
 - The old two-phase procedure (deploy without ingress, then enable it) and its files (`enable-nano-ingress.*`, `phase2-nano-ingress.tfvars`, `enableNanoIngress` / `enable_nano_ingress`) no longer exist.
 
-Notes:
-- **Troubleshooting – replica in `CrashLoopBackOff` with `RuntimeError: No CUDA GPUs are available`** (seen once in testing, with identical configuration that worked on another run). The replica was placed on a node where the GPU was not exposed to the container; the confusing `Could not import module 'ProcessorMixin'` error that follows is only a side effect. It is a platform placement issue, not a template problem. Restart the revision to get a new replica on another node:
-  ```powershell
-  az containerapp revision restart -g $rg -n nemotron-nano-12b-v2-vl --revision <revision-name>
-  ```
-  The same can happen to any GPU app. Note that `az containerapp logs show` mixes the logs of all replicas, so a stale crashing replica can make a healthy one look broken; pass `--replica <name> --container <app-name>` to read one replica. On Windows set `$env:PYTHONUTF8 = '1'` first, otherwise the CLI fails with a `charmap` encoding error on NIM's log characters.
+> [!CAUTION]
+> **Troubleshooting – replica in `CrashLoopBackOff` with `RuntimeError: No CUDA GPUs are available`** (seen once in testing, with identical configuration that worked on another run). The replica was placed on a node where the GPU was not exposed to the container; the confusing `Could not import module 'ProcessorMixin'` error that follows is only a side effect. It is a platform placement issue, not a template problem. Restart the revision to get a new replica on another node:
+>
+> ```powershell
+> az containerapp revision restart -g $rg -n nemotron-nano-12b-v2-vl --revision <revision-name>
+> ```
+>
+> The same can happen to any GPU app. Note that `az containerapp logs show` mixes the logs of all replicas, so a stale crashing replica can make a healthy one look broken; pass `--replica <name> --container <app-name>` to read one replica. On Windows set `$env:PYTHONUTF8 = '1'` first, otherwise the CLI fails with a `charmap` encoding error on NIM's log characters.
 
 ---
 
@@ -225,7 +240,8 @@ az containerapp replica list -g $rg -n nemotron-ocr-v1 -o table
 
 Each app always keeps one replica, so there is no scale-from-zero delay; right after a deployment or restart, wait for the model to load before the first request.
 `nemotron-nano-12b-v2-vl` is reached through its nginx sidecar (port 8080, see §6.1) and gets its URL at creation like the other apps; right after a deployment it answers `502` until the model has loaded.
-Ingress is **external with no authentication** (as today): anyone with the URL can call your GPUs. Add IP restrictions (`ipSecurityRestrictions`) or use §8 before sharing the URLs.
+> [!WARNING]
+> Ingress is **external with no authentication** (as today): anyone with the URL can call your GPUs. Add IP restrictions (`ipSecurityRestrictions`) or use §8 before sharing the URLs.
 
 ---
 
@@ -242,7 +258,11 @@ Bicep: set in `main.bicepparam`
 param publicNetworkAccess = 'Disabled'
 param enablePrivateEndpoint = true
 ```
-Terraform: `public_network_access = "Disabled"` and `enable_private_endpoint = true`.
+Terraform (`terraform.tfvars`):
+```hcl
+public_network_access   = "Disabled"
+enable_private_endpoint = true
+```
 
 This creates a VNet/subnet, a private endpoint (`groupId: managedEnvironments`), the private DNS zone
 `privatelink.<region>.azurecontainerapps.io`, a VNet link, and the A records `<env-unique-id>` and `*.<env-unique-id>` pointing to the endpoint IP.

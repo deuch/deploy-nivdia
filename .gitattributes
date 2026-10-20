@@ -1,1 +1,6 @@
 * text=auto eol=lf
+
+# Syntax highlighting on GitHub for files it does not detect on its own
+conf/*.conf linguist-language=Nginx
+*.bicepparam linguist-language=Bicep
+*.tfvars.example linguist-language=HCL
